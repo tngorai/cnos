@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8">
+  <meta name="description" content="CNOS: A Strong Baseline for CAD-based Novel Object Segmentation.">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CNOS: A Strong Baseline for CAD-based Novel Object Segmentation</title>
+
+  <!-- Global site tag (gtag.js) - Google Analytics -->
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-PYVRSFMDRL"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+
+    function gtag() {
+      dataLayer.push(arguments);
+    }
+
+    gtag('js', new Date());
+
+    gtag('config', 'G-PYVRSFMDRL');
+  </script>
+
+  <link href="https://fonts.googleapis.com/css?family=Google+Sans|Noto+Sans|Castoro" rel="stylesheet">
+
+  <link rel="stylesheet" href="../static/css/bulma.min.css">
+  <link rel="stylesheet" href="../static/css/bulma-carousel.min.css">
+  <link rel="stylesheet" href="../static/css/bulma-slider.min.css">
+  <link rel="stylesheet" href="../static/css/fontawesome.all.min.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/jpswalsh/academicons@1/css/academicons.min.css">
+  <link rel="stylesheet" href="../static/css/index.css">
+  <link rel="icon"
+    href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🌐</text></svg>">
+
+  <script src="https://ajax.googleapis.com/ajax/libs/jquery/3.5.1/jquery.min.js"></script>
+  <script defer src="../static/js/fontawesome.all.min.js"></script>
+  <script src="../static/js/bulma-carousel.min.js"></script>
+  <script src="../static/js/bulma-slider.min.js"></script>
+  <script src="../static/js/index.js"></script>
+</head>
+
+<body>
+
+  <section class="hero">
+    <div class="hero-body">
+      <div class="container is-max-desktop">
+        <div class="columns is-centered">
+          <div class="column has-text-centered">
+            <h1 class="title is-1 publication-title">CNOS: A Strong Baseline for CAD-based Novel Object Segmentation
+            </h1>
+            <div class="is-size-5 publication-authors">
+              <span class="author-block">
+                <a href="https://nv-nguyen.github.io/">Van Nguyen Nguyen</a><sup>1</sup>,</span>
+              <span class="author-block">
+                <a href="http://imagine.enpc.fr/~groueixt/">Thibault Groueix</a><sup>2</sup>,</span>
+              <span class="author-block">
+                <a href="https://ponimatkin.github.io/"> Georgy Ponimatkin</a><sup>1</sup>,</span>
+              <span class="author-block">
+                <a href="https://vincentlepetit.github.io/">Vincent Lepetit</a><sup>1</sup>
+              </span>
+              <a href="https://cmp.felk.cvut.cz/~hodanto2/">Tomáš Hodaň</a><sup>3</sup>
+              </span>
+            </div>
+
+            <div class="is-size-5 publication-authors">
+              <span class="author-block"><sup>1</sup>LIGM, Ecole des Ponts,</span>
+              <span class="author-block"><sup>2</sup>Adobe,</span>
+              <span class="author-block"><sup>3</sup>Meta</span>
+            </div>
+
+            <div class="column has-text-centered">
+              <div class="publication-links">
+                <!-- PDF Link. -->
+                <span class="link-block">
+                  <a href="http://arxiv.org/abs/2307.11067" class="external-link button is-normal is-rounded is-dark">
+                    <span class="icon">
+                      <i class="fas fa-file-pdf"></i>
+                    </span>
+                    <span>Paper</span>
+                  </a>
+                </span>
+                <!-- Code Link. -->
+                <span class="link-block">
+                  <a href="https://github.com/nv-nguyen/cnos" class="external-link button is-normal is-rounded is-dark">
+                    <span class="icon">
+                      <i class="fab fa-github"></i>
+                    </span>
+                    <span>Code</span>
+                  </a>
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="BibTeX">
+    <div class="container is-max-desktop">
+      <!-- Abstract. -->
+      <div class="columns is-centered has-text-centered">
+        <div class="column is-five-fifths">
+          <h2 class="title is-3">Overview</h2>
+          <div class="content has-text-justified">
+            <image src="images/framework.png" width="1280" class="img-responsive" alt="overview"><br>
+              <p class="text-justify">
+                <strong>TL;DR:</strong> CNOS is a simple approach to segment novel objects in RGB images from only their
+                CAD models. CNOS first uses Segmenting Anything to generate object's masks, then uses "CLS" token of
+                DINOv2 to assign the class and confidence score.
+              </p>
+          </div>
+  </section>
+
+  <section class="section">
+    <div class="container is-max-desktop">
+      <!-- Abstract. -->
+      <div class="columns is-centered has-text-centered">
+        <div class="column is-five-fifths">
+          <h2 class="title is-3">Abstract</h2>
+          <div class="content has-text-justified">
+            <p>
+              We propose a simple yet powerful method to segment novel objects in RGB images from their CAD models.
+              Leveraging recent foundation models, Segment Anything and DINOv2, we generate segmentation proposals in
+              the input image and match them against object templates that are pre-rendered using the CAD models. The
+              matching is realized by comparing DINOv2 cls tokens of the proposed regions and the templates. The output
+              of the method is a set of segmentation masks associated with per-object confidences defined by the
+              matching scores. We experimentally demonstrate that the proposed method achieves state-of-the-art results
+              in CAD-based novel object segmentation on the seven core datasets of the BOP challenge, surpassing the
+              recent method of Chen et al. by absolute 19.8% AP.
+            </p>
+          </div>
+        </div>
+      </div>
+      <!--/ Abstract. -->
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container is-max-desktop">
+      <!-- Abstract. -->
+      <div class="columns is-centered has-text-centered">
+        <div class="column is-five-fifths">
+          <h2 class="title is-3">Qualitative results</h2>
+          <div class="content has-text-justified">
+            <image src="images/qualitative.png" width="1280" class="img-responsive" alt="qualitative"><br>
+              <p class="text-justify">
+                <strong>Qualitative results on LM-O, HB, and YCB-V datasets.</strong> The first column shows the input
+                CAD models. In cases where there are more than 16 models, we only show the first 16 to ensure better
+                visibility. The second column show the input RGB image and the last two columns depict the detections
+                produced by CNOS (SAM) and CNOS (FastSAM) with confidence scores greater than 0.5. Interestingly, in the
+                last row, even though the segmentation proposals in CNOS (SAM) and CNOS (FastSAM) are very similar,
+                their final labels differ for a few objects.
+              </p>
+          </div>
+
+          <div class="content has-text-justified">
+            <image src="images/qualitative_ycbv.gif" width="1280" class="img-responsive" alt="qualitative_ycbv"><br>
+              <p class="text-justify">
+                <strong>Qualitative results on YCB-V dataset.</strong> We show the segmentation "per frame" (i.e no temporal constraints).
+              </p>
+          </div>
+        </div>
+      </div>
+      <!--/ Abstract. -->
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="container is-max-desktop">
+      <!-- Abstract. -->
+      <div class="columns is-centered has-text-centered">
+        <div class="column is-five-fifths">
+          <h2 class="title is-3">Using CNOS on your custom objects</h2>
+          <div class="content has-text-justified">
+            <image src="images/demo_megaPose.png" width="1280" class="img-responsive" alt="qualitative_megaPose"><br>
+            
+            <image src="images/demo_needleHolder.png" width="1280" class="img-responsive" alt="qualitative"><br>
+              <p class="text-justify">
+                <strong>Demo.</strong> We provide the demo code to run CNOS on your custom objects. Please follow the instructions in <a href="https://github.com/nv-nguyen/cnos"> our Github repo </a>.
+              </p>
+          </div>
+        </div>
+      </div>
+      <!--/ Abstract. -->
+    </div>
+  </section>
+
+  <section class="section" id="BibTeX">
+    <div class="container is-max-desktop content">
+      <h2 class="title">BibTeX</h2>
+      <pre><code>@inproceedings{nguyen2023cnos,
+        title     = {CNOS: A Strong Baseline for CAD-based Novel Object Segmentation},
+        author    = {Nguyen, Van Nguyen and Groueix, Thibault and Ponimatkin, Georgy and Lepetit, Vincent and Hodan, Tomas},
+        booktitle = {Proceedings of the IEEE/CVF International Conference on Computer Vision},
+        pages     = {2134--2140},
+        year      = {2023}
+      }</code></pre>
+    </div>
+  </section>
+
+  <section class="section" id="BibTeX">
+    <div class="container is-max-desktop content">
+      <h2 class="title">Further information</h2>
+      If you like this project, check out our works on 6D novel object pose estimation:
+      <ul>
+        <li><a href="https://nv-nguyen.github.io/gigaPose/"> GigaPose: Fast and Robust Novel Object Pose Estimation via One Correspondence (arXiv 2023) </a></li> 
+        <li><a href="https://nv-nguyen.github.io/template-pose/"> Templates for 3D Object Pose Estimation Revisited: Generalization to New Objects and Robustness to Occlusions (CVPR 2022)</a></li> 
+      </ul>
+    </div>
+    
+
+  </section>
+
+
+  <footer class="footer">
+    <div class="container">
+      <div class="columns is-centered">
+        <div class="column is-8">
+          <div class="content">
+            <p>
+              This website is taken from <a href="https://github.com/nerfies/nerfies.github.io">here</a>.
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+</body>
+
+</html>

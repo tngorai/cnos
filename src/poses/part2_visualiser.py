@@ -20,6 +20,8 @@ Author: Built on Viser (viser) for the interactive web dashboard.
 import json
 import os
 import time
+import csv
+import io
 from typing import Optional, Dict
 
 import numpy as np
@@ -139,6 +141,79 @@ def load_mask_visib(frame_id: int, obj_seq: int = 0) -> Optional[np.ndarray]:
         return None
     img = cv2.imread(fpath, cv2.IMREAD_GRAYSCALE)
     return (img > 0).astype(np.uint8)
+
+
+# =============================================================================
+# CSV PARSER — parse BOP-format prediction files uploaded by the user
+# =============================================================================
+def parse_bop_csv(csv_bytes: bytes) -> Dict[str, list]:
+    """Parse a BOP-format CSV results file into our predictions dict.
+    
+    BOP CSV format (from https://bop.felk.cvut.cz/challenges/bop-challenge-2019/):
+      scene_id, im_id, obj_id, score, R, t, time
+    
+    R is 9 space-separated floats (3×3 rotation matrix, row-major).
+    t is 3 space-separated floats (translation vector in mm).
+    
+    Returns: dict mapping frame_id (str) → list of {obj_id, cam_R_m2c, cam_t_m2c}
+    """
+    text = csv_bytes.decode("utf-8")
+    reader = csv.reader(io.StringIO(text))
+    rows = list(reader)
+    
+    if len(rows) < 2:
+        raise ValueError("CSV has no data rows (only header, or empty).")
+    
+    header = [h.strip().lower() for h in rows[0]]
+    required = {"scene_id", "im_id", "obj_id", "r", "t"}
+    missing = required - set(header)
+    if missing:
+        raise ValueError(f"CSV missing required columns: {missing}. Expected: scene_id,im_id,obj_id,score,R,t,time")
+    
+    # Build column index map
+    col = {name: idx for idx, name in enumerate(header)}
+    
+    predictions: Dict[str, list] = {}
+    skipped = 0
+    
+    for row_num, row in enumerate(rows[1:], start=2):
+        if len(row) < max(col.values()) + 1:
+            skipped += 1
+            continue
+        
+        try:
+            im_id = row[col["im_id"]].strip()            # frame ID = image ID
+            obj_id = int(row[col["obj_id"]])
+            
+            # Parse R: 9 space-separated floats
+            r_str = row[col["r"]].strip()
+            r_vals = [float(x) for x in r_str.split()]
+            if len(r_vals) != 9:
+                raise ValueError(f"Expected 9 R values, got {len(r_vals)}")
+            R = np.array(r_vals, dtype=np.float64).reshape(3, 3).tolist()
+            
+            # Parse t: 3 space-separated floats
+            t_str = row[col["t"]].strip()
+            t_vals = [float(x) for x in t_str.split()]
+            if len(t_vals) != 3:
+                raise ValueError(f"Expected 3 t values, got {len(t_vals)}")
+            t = t_vals
+            
+            if im_id not in predictions:
+                predictions[im_id] = []
+            predictions[im_id].append({
+                "obj_id": obj_id,
+                "cam_R_m2c": sum(R, []),   # flatten 3×3 → list of 9 floats
+                "cam_t_m2c": t,
+            })
+        except (ValueError, IndexError) as e:
+            skipped += 1
+            continue
+    
+    if not predictions:
+        raise ValueError(f"No valid prediction rows found (skipped {skipped}). Check CSV format.")
+    
+    return predictions
 
 
 # =============================================================================
@@ -445,6 +520,25 @@ def main():
     # Pre-render the Plotly error graph
     error_plotly_fig = build_error_plotly(frame_ids, scene_gt, predictions)
 
+    # Compute where objects are in 3D to center the camera
+    all_gt_positions = []
+    for f_str in scene_gt:
+        for obj in scene_gt[f_str]:
+            all_gt_positions.append(obj["cam_t_m2c"])
+    if all_gt_positions:
+        center = np.mean(all_gt_positions, axis=0)
+        # Camera looks at the objects from ~600mm behind and slightly above
+        look_at = center  # e.g. [0, 0, 850]
+        cam_pos = np.array([look_at[0], look_at[1] + 300.0, look_at[2] - 500.0])
+    else:
+        look_at = (0.0, 0.0, 0.0)
+        cam_pos = (0.0, 300.0, -500.0)
+
+    server.initial_camera.position = np.array(cam_pos, dtype=np.float64)
+    server.initial_camera.look_at = np.array(look_at, dtype=np.float64)
+    server.initial_camera.far = 8000.0   # far enough to see objects even at 2000mm+
+    server.initial_camera.fov = 55.0     # slightly wider field of view
+
     # --- GUI: left panel controls ---
     with server.gui.add_folder("🎮 Controls"):
         frame_slider = server.gui.add_slider(
@@ -458,7 +552,21 @@ def main():
         btn_next = server.gui.add_button("Next Frame ▶")
         show_gt_cb = server.gui.add_checkbox("Show Ground Truth", initial_value=True)
         show_pred_cb = server.gui.add_checkbox("Show Predictions", initial_value=True)
-        stats_md = server.gui.add_markdown("*Use the slider or Prev/Next buttons to switch frames*")
+
+        # Object filter dropdown
+        unique_obj_ids = sorted(set(
+            obj["obj_id"] for f_str in scene_gt for obj in scene_gt[f_str]
+        ))
+        obj_id_options = [str(oid) for oid in unique_obj_ids]
+        obj_id_options.insert(0, "All")
+        obj_filter_dropdown = server.gui.add_dropdown(
+            "Object ID Filter",
+            options=obj_id_options,
+            initial_value="All",
+        )
+        stats_md = server.gui.add_markdown(
+            "*Use slider or buttons to switch frames.  Press **R** in 3D view to reset camera.*"
+        )
 
     # The 2D composite image (rendered each frame change)
     with server.gui.add_folder("📷 2D View (RGB + Boxes + Masks)"):
@@ -474,6 +582,63 @@ def main():
             error_plotly_fig,
             config={"displayModeBar": True, "displaylogo": False},
         )
+
+    # --- Upload predictions CSV ---
+    with server.gui.add_folder("📤 Upload Model Results"):
+        upload_btn = server.gui.add_upload_button(
+            "Upload Predictions CSV",
+            mime_type=".csv,text/csv",
+        )
+        upload_status = server.gui.add_markdown(
+            "### How to upload your model's results\n\n"
+            "Upload a **.csv file** with exactly these columns:\n\n"
+            "| Column | Meaning | Example |\n"
+            "|---|---|---|\n"
+            "| `scene_id` | Scene number | `1` |\n"
+            "| `im_id` | Frame / image ID | `0`, `1`, `2` ... |\n"
+            "| `obj_id` | Object ID | `1`, `2`, or `3` |\n"
+            "| `score` | Confidence score | `0.999` (optional) |\n"
+            "| `R` | Rotation: 9 floats separated by spaces | `-0.98 -0.10 -0.17 0.02 0.79 -0.61 0.20 -0.60 -0.77` |\n"
+            "| `t` | Translation in mm: 3 floats separated by spaces | `123.6 61.2 910.1` |\n"
+            "| `time` | Processing time | `4.7` (optional) |\n\n"
+            "**Beispiel row:**\n"
+            "```\n1,1436,1,0.999,-0.98 -0.10 -0.17 0.02 0.79 -0.61 0.20 -0.60 -0.77,123.6 61.2 910.1,4.7\n```\n\n"
+            "**How R works:** 9 numbers in **row-major order**, i.e.\n"
+            "`R[0,0] R[0,1] R[0,2] R[1,0] R[1,1] R[1,2] R[2,0] R[2,1] R[2,2]`\n"
+            "which equals this 3×3 matrix:\n"
+            "```\n┌                        ┐\n│ R[0,0]  R[0,1]  R[0,2] │\n│ R[1,0]  R[1,1]  R[1,2] │\n│ R[2,0]  R[2,1]  R[2,2] │\n└                        ┘\n```\n\n"
+            "**How t works:** 3 numbers = `[x, y, z]` position in millimetres.\n\n"
+            "After upload, graphs and 3D view update automatically."
+        )
+        # Mutable container so we can update predictions from within the polling loop
+        predictions_container = [predictions]
+        # Track previous upload to detect new uploads
+        prev_upload_content = [None]
+
+        def check_and_process_upload():
+            """Called from the keep-alive polling loop to detect CSV uploads."""
+            uf = upload_btn.value
+            if uf is None or not uf.content or len(uf.content) == 0:
+                return
+            content = bytes(uf.content)
+            if content == prev_upload_content[0]:
+                return
+            prev_upload_content[0] = content
+            upload_status.content = "**Processing... ⏳**"
+            try:
+                new_preds = parse_bop_csv(content)
+                predictions_container[0] = new_preds
+                uploaded_frames = sorted(int(k) for k in new_preds.keys())
+                upload_status.content = (
+                    f"**✅ Uploaded!** {len(uploaded_frames)} frames loaded "
+                    f"(IDs {uploaded_frames[0]}..{uploaded_frames[-1]}), "
+                    f"{sum(len(v) for v in new_preds.values())} total predictions.\n\n"
+                    f"Graphs and 3D view now show your results."
+                )
+                # Redraw everything with new predictions
+                update_all(int(frame_slider.value))
+            except Exception as e:
+                upload_status.content = f"**❌ Error:** {str(e)[:300]}"
 
     # 3D scene setup
     server.scene.add_icosphere(
@@ -659,16 +824,25 @@ def main():
     def _(_):
         update_all(int(frame_slider.value))
 
+    @obj_filter_dropdown.on_update
+    def _(_):
+        update_all(int(frame_slider.value))
+
     # --- Initial draw ---
     update_all(min_frame)
 
     print("Dashboard ready! Use slider, buttons, or ← → arrow keys to navigate.\n")
     print("  Green  = Ground Truth     Red = Prediction\n")
     print("Press Ctrl+C to stop.")
+    print("Waiting for user uploads or frame changes.\n")
 
+    # --- Keep-alive + upload polling loop ---
     try:
         while True:
-            time.sleep(0.5)
+            time.sleep(0.3)
+            check_and_process_upload()
+            # Update the predictions reference that update_all uses
+            predictions = predictions_container[0]
     except KeyboardInterrupt:
         print("\nShutting down.")
 

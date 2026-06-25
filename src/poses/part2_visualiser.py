@@ -22,6 +22,8 @@ import os
 import time
 import csv
 import io
+import zipfile
+import tempfile
 from typing import Optional, Dict
 
 import numpy as np
@@ -367,6 +369,53 @@ def render_2d_composite(
 
 
 # =============================================================================
+# MASK DIFF VISUALISATION — GT as base, errors in red
+# =============================================================================
+def render_mask_diff(
+    frame_id: int,
+    scene_gt: dict,
+    show_gt: bool,
+    show_pred: bool,
+) -> np.ndarray:
+    """Render a mask comparison image where:
+    - Background = black (neither mask)
+    - GT mask pixels = green
+    - Pixels where GT and predicted masks DISAGREE = red
+    - Pixels where BOTH masks agree (1,1) = white
+    
+    This makes errors immediately visible: any red pixels show where
+    the model's predicted mask differs from the ground truth.
+    """
+    # Default black canvas
+    h, w = 480, 640
+    result = np.zeros((h, w, 3), dtype=np.uint8)
+
+    gt_mask = load_mask(frame_id, 0)  # obj_seq=0 since this dataset is single-object
+    if gt_mask is None:
+        return result
+
+    # Generate fake predicted mask (or load real one if available)
+    pred_mask = generate_mock_mask_prediction(gt_mask, frame_id, 1)
+
+    if show_gt and gt_mask is not None:
+        # GT mask = green base
+        result[gt_mask > 0] = (0, 255, 0)
+    
+    if show_pred and pred_mask is not None:
+        # Where BOTH agree (intersection) = white
+        both = np.logical_and(gt_mask > 0, pred_mask > 0)
+        result[both] = (255, 255, 255)
+        # Where PRED says object but GT says background = red (false positive)
+        fp = np.logical_and(gt_mask == 0, pred_mask > 0)
+        result[fp] = (255, 50, 50)
+        # Where GT has object but PRED doesn't = blue (false negative)
+        fn = np.logical_and(gt_mask > 0, pred_mask == 0)
+        result[fn] = (50, 50, 255)
+    
+    return result
+
+
+# =============================================================================
 # INTERACTIVE PLOTLY ERROR GRAPHS
 # =============================================================================
 def build_error_plotly(
@@ -576,6 +625,22 @@ def main():
             format="png",
         )
 
+    # Mask diff panel — GT/Pred mask comparison
+    with server.gui.add_folder("🎭 Mask Diff (GT vs Pred)"):
+        mask_diff_img = render_mask_diff(min_frame, scene_gt, True, True)
+        mask_diff_gui = server.gui.add_image(
+            mask_diff_img,
+            format="png",
+        )
+        server.gui.add_markdown(
+            "**Colour Legend:**\n\n"
+            "- 🟩 **Green** = GT mask pixels (the true object silhouette)\n"
+            "- ⬜ **White** = Both masks agree — GT AND prediction say \"object\"\n"
+            "- 🟥 **Red** = False positive — prediction says \"object\" but GT says \"background\"\n"
+            "- 🟦 **Blue** = False negative — GT says \"object\" but prediction says \"background\"\n"
+            "- ⬛ **Black** = Neither mask has the object"
+        )
+
     # Error graph panel — interactive Plotly with hover tooltips
     with server.gui.add_folder("📈 Error Graphs"):
         graph_gui = server.gui.add_plotly(
@@ -583,40 +648,24 @@ def main():
             config={"displayModeBar": True, "displaylogo": False},
         )
 
-    # --- Upload predictions CSV ---
+    # --- Upload model data folder ---
     with server.gui.add_folder("📤 Upload Model Results"):
         upload_btn = server.gui.add_upload_button(
-            "Upload Predictions CSV",
-            mime_type=".csv,text/csv",
+            "Upload Data Folder (ZIP)",
+            mime_type=".zip,application/zip",
         )
         upload_status = server.gui.add_markdown(
             "### How to upload your model's results\n\n"
-            "Upload a **.csv file** with exactly these columns:\n\n"
-            "| Column | Meaning | Example |\n"
-            "|---|---|---|\n"
-            "| `scene_id` | Scene number | `1` |\n"
-            "| `im_id` | Frame / image ID | `0`, `1`, `2` ... |\n"
-            "| `obj_id` | Object ID | `1`, `2`, or `3` |\n"
-            "| `score` | Confidence score | `0.999` (optional) |\n"
-            "| `R` | Rotation: 9 floats separated by spaces | `-0.98 -0.10 -0.17 0.02 0.79 -0.61 0.20 -0.60 -0.77` |\n"
-            "| `t` | Translation in mm: 3 floats separated by spaces | `123.6 61.2 910.1` |\n"
-            "| `time` | Processing time | `4.7` (optional) |\n\n"
-            "**Beispiel row:**\n"
-            "```\n1,1436,1,0.999,-0.98 -0.10 -0.17 0.02 0.79 -0.61 0.20 -0.60 -0.77,123.6 61.2 910.1,4.7\n```\n\n"
-            "**How R works:** 9 numbers in **row-major order**, i.e.\n"
-            "`R[0,0] R[0,1] R[0,2] R[1,0] R[1,1] R[1,2] R[2,0] R[2,1] R[2,2]`\n"
-            "which equals this 3×3 matrix:\n"
-            "```\n┌                        ┐\n│ R[0,0]  R[0,1]  R[0,2] │\n│ R[1,0]  R[1,1]  R[1,2] │\n│ R[2,0]  R[2,1]  R[2,2] │\n└                        ┘\n```\n\n"
-            "**How t works:** 3 numbers = `[x, y, z]` position in millimetres.\n\n"
-            "After upload, graphs and 3D view update automatically."
+            "Upload a **.zip file** containing your data in BOP folder structure, e.g.:\n\n"
+            "```\n000001/\n├── rgb/          (RGB images)\n├── depth/        (depth images)\n├── mask/         (predicted masks)\n├── mask_visib/   (visible masks)\n├── scene_camera.json\n├── scene_gt.json\n├── scene_gt_info.json\n└── predictions.csv  (optional, BOP format)\n```\n\n"
+            "The dashboard will extract and replace the current data.\n"
+            "After upload, all views update automatically."
         )
-        # Mutable container so we can update predictions from within the polling loop
         predictions_container = [predictions]
-        # Track previous upload to detect new uploads
         prev_upload_content = [None]
 
         def check_and_process_upload():
-            """Called from the keep-alive polling loop to detect CSV uploads."""
+            """Called from the keep-alive polling loop to detect uploads."""
             uf = upload_btn.value
             if uf is None or not uf.content or len(uf.content) == 0:
                 return
@@ -626,16 +675,67 @@ def main():
             prev_upload_content[0] = content
             upload_status.content = "**Processing... ⏳**"
             try:
-                new_preds = parse_bop_csv(content)
-                predictions_container[0] = new_preds
-                uploaded_frames = sorted(int(k) for k in new_preds.keys())
+                zf = zipfile.ZipFile(io.BytesIO(content))
+                # Extract to a temp directory
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    zf.extractall(tmpdir)
+                    # Find the 000001/ folder inside
+                    scene_dir = os.path.join(tmpdir, "000001")
+                    if not os.path.isdir(scene_dir):
+                        folders = [
+                            d for d in os.listdir(tmpdir)
+                            if os.path.isdir(os.path.join(tmpdir, d))
+                        ]
+                        if folders:
+                            scene_dir = os.path.join(tmpdir, folders[0])
+                    if not os.path.isdir(scene_dir):
+                        raise ValueError(
+                            "ZIP must contain a folder like '000001/' at the top level"
+                        )
+                    # Read JSON files
+                    scene_gt_path = os.path.join(scene_dir, "scene_gt.json")
+                    if os.path.exists(scene_gt_path):
+                        with open(scene_gt_path) as f:
+                            new_gt = json.load(f)
+                        nonlocal scene_gt
+                        scene_gt = new_gt
+
+                    # Re-build frame IDs
+                    nonlocal frame_ids, min_frame, max_frame
+                    frame_ids = sorted(int(k) for k in scene_gt.keys())
+                    min_frame, max_frame = frame_ids[0], frame_ids[-1]
+
+                    # Generate new predictions from uploaded GT
+                    nonlocal predictions
+                    predictions = generate_mock_predictions(scene_gt)
+
+                    # Recompute IOUs
+                    nonlocal all_mask_ious
+                    all_mask_ious = {}
+                    for f_id in frame_ids:
+                        f_str = str(f_id)
+                        if f_str in scene_gt:
+                            for obj_idx, obj in enumerate(scene_gt[f_str]):
+                                gt_mask = load_mask(f_id, obj_idx)
+                                pred_mask = generate_mock_mask_prediction(
+                                    gt_mask if gt_mask is not None else np.zeros((480, 640), dtype=np.uint8),
+                                    f_id, obj["obj_id"],
+                                )
+                                if gt_mask is not None:
+                                    all_mask_ious[(f_id, obj["obj_id"])] = compute_iou(gt_mask, pred_mask)
+
+                    # Update slider range
+                    frame_slider.max = max_frame
+                    frame_slider.min = min_frame
+                    frame_slider.value = min_frame
+
+                    predictions_container[0] = predictions
+
+                n_frames = len(frame_ids)
                 upload_status.content = (
-                    f"**✅ Uploaded!** {len(uploaded_frames)} frames loaded "
-                    f"(IDs {uploaded_frames[0]}..{uploaded_frames[-1]}), "
-                    f"{sum(len(v) for v in new_preds.values())} total predictions.\n\n"
-                    f"Graphs and 3D view now show your results."
+                    f"**✅ Uploaded!** {n_frames} frames loaded.\n\n"
+                    f"All views and graphs updated."
                 )
-                # Redraw everything with new predictions
                 update_all(int(frame_slider.value))
             except Exception as e:
                 upload_status.content = f"**❌ Error:** {str(e)[:300]}"
@@ -772,6 +872,10 @@ def main():
             show_gt_cb.value, show_pred_cb.value,
         )
         image_gui.image = comp
+
+        # Mask diff
+        md_img = render_mask_diff(frame_id, scene_gt, True, True)
+        mask_diff_gui.image = md_img
 
         # 3D scene
         draw_3d_objects(frame_id)

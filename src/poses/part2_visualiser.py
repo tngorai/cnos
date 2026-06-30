@@ -132,29 +132,47 @@ def load_json(filename: str) -> dict:
         return json.load(f)
 
 
-def load_mask(frame_id: int, obj_seq: int = 0) -> Optional[np.ndarray]:
-    """Load the full (amodal) binary mask for a given frame+object.
+def _find_frame_file(base_dir: str, frame_id: int, obj_seq: int = 0) -> Optional[str]:
+    """Try multiple naming conventions for frame files.
     
-    BOP mask naming: {frame_id:0{FRAME_PAD}d}_{obj_seq:06d}.png
-    where obj_seq is the 0-based index of the object within the scene,
-    NOT the obj_id from scene_gt.json.
+    BOP standard: {frame_id}_{obj_seq}.png  (e.g. 000000_000000.png)
+    Alternative:  {frame_id}.png            (e.g. 000000.png — zethon format)
+    
+    Returns the full path if found, None otherwise.
     """
-    fname = f"{frame_id:0{_FRAME_PAD}d}_{obj_seq:06d}.png"
-    fpath = os.path.join(MASK_DIR, fname)
-    if not os.path.exists(fpath):
+    padding = _FRAME_PAD
+    # Try BOP naming first: FRAME_OBJSEQ.png
+    for pad in (padding, padding-1, padding+1, 5, 6, 4):
+        if pad <= 0:
+            continue
+        fname = f"{frame_id:0{pad}d}_{obj_seq:06d}.png"
+        fpath = os.path.join(base_dir, fname)
+        if os.path.exists(fpath):
+            return fpath
+    # Fallback: just FRAME.png (zethon format)
+    for pad in (padding, padding-1, padding+1, 5, 6, 4):
+        if pad <= 0:
+            continue
+        fname = f"{frame_id:0{pad}d}.png"
+        fpath = os.path.join(base_dir, fname)
+        if os.path.exists(fpath):
+            return fpath
+    return None
+
+
+def load_mask(frame_id: int, obj_seq: int = 0) -> Optional[np.ndarray]:
+    """Load the full (amodal) binary mask for a given frame+object."""
+    fpath = _find_frame_file(MASK_DIR, frame_id, obj_seq)
+    if fpath is None:
         return None
     img = cv2.imread(fpath, cv2.IMREAD_GRAYSCALE)
     return (img > 0).astype(np.uint8)
 
 
 def load_mask_visib(frame_id: int, obj_seq: int = 0) -> Optional[np.ndarray]:
-    """Load the visible-part binary mask for a given frame+object.
-    
-    BOP mask naming: {frame_id:0{FRAME_PAD}d}_{obj_seq:06d}.png
-    """
-    fname = f"{frame_id:0{_FRAME_PAD}d}_{obj_seq:06d}.png"
-    fpath = os.path.join(MASK_VISIB_DIR, fname)
-    if not os.path.exists(fpath):
+    """Load the visible-part binary mask for a given frame+object."""
+    fpath = _find_frame_file(MASK_VISIB_DIR, frame_id, obj_seq)
+    if fpath is None:
         return None
     img = cv2.imread(fpath, cv2.IMREAD_GRAYSCALE)
     return (img > 0).astype(np.uint8)
@@ -276,8 +294,10 @@ def generate_mock_mask_prediction(gt_mask: np.ndarray, frame_id: int, obj_id: in
     Uses deterministic pseudo-randomness seeded by frame+obj so the same
     (frame, obj) always produces the same 'prediction'.
     """
-    if gt_mask is None or gt_mask.sum() == 0:
-        return np.zeros((480, 640), dtype=np.uint8)
+    if gt_mask is None:
+        return None
+    if gt_mask.sum() == 0:
+        return np.zeros(gt_mask.shape, dtype=np.uint8)
 
     rng = np.random.RandomState(frame_id * 1000 + obj_id)
     kernel_size = rng.randint(1, 8)  # erosion kernel 1..7 px
@@ -401,13 +421,20 @@ def render_mask_diff(
     This makes errors immediately visible: any red pixels show where
     the model's predicted mask differs from the ground truth.
     """
-    # Default black canvas
-    h, w = 480, 640
-    result = np.zeros((h, w, 3), dtype=np.uint8)
-
     gt_mask = load_mask(frame_id, 0)  # obj_seq=0 since this dataset is single-object
     if gt_mask is None:
-        return result
+        # Try to determine image size from the RGB directory
+        rgb_path = os.path.join(RGB_DIR, f"{frame_id:0{_FRAME_PAD}d}.png")
+        if os.path.exists(rgb_path):
+            test_img = cv2.imread(rgb_path)
+            h, w = test_img.shape[:2]
+        else:
+            h, w = 640, 480
+        return np.zeros((h, w, 3), dtype=np.uint8)
+
+    # Use actual mask dimensions (handles varying resolutions like 1080×1920)
+    h, w = gt_mask.shape[:2]
+    result = np.zeros((h, w, 3), dtype=np.uint8)
 
     # Generate fake predicted mask (or load real one if available)
     pred_mask = generate_mock_mask_prediction(gt_mask, frame_id, 1)
@@ -853,6 +880,10 @@ def main():
                     with open(scene_gt_info_path) as f:
                         nonlocal scene_gt_info
                         scene_gt_info = json.load(f)
+
+                # Rebuild the Plotly error graph from scratch with new data
+                new_fig = build_error_plotly(frame_ids, scene_gt, predictions)
+                graph_gui.figure = new_fig
 
                 n_frames = len(frame_ids)
                 upload_status.content = (

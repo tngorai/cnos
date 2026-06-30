@@ -25,6 +25,7 @@ import io
 import zipfile
 import tempfile
 from typing import Optional, Dict
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 import cv2
@@ -41,6 +42,20 @@ DATA_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../data/0
 RGB_DIR = os.path.join(DATA_DIR, "rgb")
 MASK_DIR = os.path.join(DATA_DIR, "mask")
 MASK_VISIB_DIR = os.path.join(DATA_DIR, "mask_visib")
+_FRAME_PAD = 6  # default padding width; auto-detected from actual filenames
+
+def _detect_frame_padding(mask_or_rgb_dir: str) -> int:
+    """Look at filenames on disk to determine how many digits frame IDs use."""
+    if not os.path.isdir(mask_or_rgb_dir):
+        return 6
+    for fname in os.listdir(mask_or_rgb_dir):
+        # mask files: XXXXXX_XXXXXX.png, rgb files: XXXXXX.png
+        name = fname.split("_")[0]
+        name = name.split(".")[0]
+        if name.isdigit():
+            return len(name)
+    return 6
+_FRAME_PAD = _detect_frame_padding(MASK_DIR)
 
 # Path to the 3D CAD models (.ply files) for TUD-L objects
 MODEL_DIR = "/home/aryan/Downloads/tudl_models/models"
@@ -120,11 +135,11 @@ def load_json(filename: str) -> dict:
 def load_mask(frame_id: int, obj_seq: int = 0) -> Optional[np.ndarray]:
     """Load the full (amodal) binary mask for a given frame+object.
     
-    BOP mask naming: {frame_id:05d}_{obj_seq:06d}.png
+    BOP mask naming: {frame_id:0{FRAME_PAD}d}_{obj_seq:06d}.png
     where obj_seq is the 0-based index of the object within the scene,
     NOT the obj_id from scene_gt.json.
     """
-    fname = f"{frame_id:06d}_{obj_seq:06d}.png"
+    fname = f"{frame_id:0{_FRAME_PAD}d}_{obj_seq:06d}.png"
     fpath = os.path.join(MASK_DIR, fname)
     if not os.path.exists(fpath):
         return None
@@ -135,9 +150,9 @@ def load_mask(frame_id: int, obj_seq: int = 0) -> Optional[np.ndarray]:
 def load_mask_visib(frame_id: int, obj_seq: int = 0) -> Optional[np.ndarray]:
     """Load the visible-part binary mask for a given frame+object.
     
-    BOP mask naming: {frame_id:06d}_{obj_seq:06d}.png
+    BOP mask naming: {frame_id:0{FRAME_PAD}d}_{obj_seq:06d}.png
     """
-    fname = f"{frame_id:06d}_{obj_seq:06d}.png"
+    fname = f"{frame_id:0{_FRAME_PAD}d}_{obj_seq:06d}.png"
     fpath = os.path.join(MASK_VISIB_DIR, fname)
     if not os.path.exists(fpath):
         return None
@@ -295,7 +310,7 @@ def render_2d_composite(
     show_pred: bool,
 ) -> np.ndarray:
     """Return an RGBA numpy array of the RGB image with GT/Pred overlays drawn."""
-    rgb_path = os.path.join(RGB_DIR, f"{frame_id:06d}.png")
+    rgb_path = os.path.join(RGB_DIR, f"{frame_id:0{_FRAME_PAD}d}.png")
     if not os.path.exists(rgb_path):
         return np.zeros((480, 640, 4), dtype=np.uint8)
 
@@ -413,6 +428,19 @@ def render_mask_diff(
         result[fn] = (50, 50, 255)
     
     return result
+
+
+# =============================================================================
+# PLOTLY HELPER — cheap frame marker update (no full rebuild)
+# =============================================================================
+def _update_plotly_frame_marker(graph_handle, frame_id: int) -> None:
+    """Move the dashed yellow vertical line to `frame_id` without rebuilding
+    the entire Plotly figure.  This is ~2 ms instead of ~150 ms."""
+    fig = graph_handle.figure
+    if len(fig.layout.shapes) >= 1:
+        fig.layout.shapes[0].x0 = frame_id
+        fig.layout.shapes[0].x1 = frame_id
+    graph_handle.figure = fig
 
 
 # =============================================================================
@@ -649,6 +677,9 @@ def main():
         )
 
     # --- Upload model data folder ---
+    # Persistent extraction directory so RGB/mask files survive after upload
+    _persistent_extract_dir = os.path.join(tempfile.gettempdir(), "cnos_uploaded_data")
+
     with server.gui.add_folder("📤 Upload Model Results"):
         upload_btn = server.gui.add_upload_button(
             "Upload Data Folder (ZIP)",
@@ -656,10 +687,29 @@ def main():
         )
         upload_status = server.gui.add_markdown(
             "### How to upload your model's results\n\n"
-            "Upload a **.zip file** containing your data in BOP folder structure, e.g.:\n\n"
-            "```\n000001/\n├── rgb/          (RGB images)\n├── depth/        (depth images)\n├── mask/         (predicted masks)\n├── mask_visib/   (visible masks)\n├── scene_camera.json\n├── scene_gt.json\n├── scene_gt_info.json\n└── predictions.csv  (optional, BOP format)\n```\n\n"
-            "The dashboard will extract and replace the current data.\n"
-            "After upload, all views update automatically."
+            "Upload a **.zip file** containing a BOP dataset.  The dashboard will "
+            "automatically find the scene folder and 3D models, regardless of nesting.\n\n"
+            "**Standard BOP structure:**\n"
+            "```\n"
+            "tudl/\n"
+            "├── models/[_eval]/          (3D CAD models + models_info.json)\n"
+            "│   ├── obj_000001.ply\n"
+            "│   ├── obj_000002.ply\n"
+            "│   └── …\n"
+            "├── test/                     (or train/val/onboarding)\n"
+            "│   └── 000002/\n"
+            "│       ├── rgb/\n"
+            "│       ├── depth/\n"
+            "│       ├── mask/\n"
+            "│       ├── mask_visib/       (optional)\n"
+            "│       ├── scene_camera.json\n"
+            "│       ├── scene_gt.json\n"
+            "│       └── scene_gt_info.json\n"
+            "```\n\n"
+            "**What happens on upload:**\n"
+            "- 3D models replace the current CAD meshes in the 3D view\n"
+            "- scene_gt.json replaces the current ground truth data\n"
+            "- All views and graphs update automatically"
         )
         predictions_container = [predictions]
         prev_upload_content = [None]
@@ -675,61 +725,134 @@ def main():
             prev_upload_content[0] = content
             upload_status.content = "**Processing... ⏳**"
             try:
+                import shutil
                 zf = zipfile.ZipFile(io.BytesIO(content))
-                # Extract to a temp directory
-                with tempfile.TemporaryDirectory() as tmpdir:
-                    zf.extractall(tmpdir)
-                    # Find the 000001/ folder inside
-                    scene_dir = os.path.join(tmpdir, "000001")
-                    if not os.path.isdir(scene_dir):
-                        folders = [
-                            d for d in os.listdir(tmpdir)
-                            if os.path.isdir(os.path.join(tmpdir, d))
-                        ]
-                        if folders:
-                            scene_dir = os.path.join(tmpdir, folders[0])
-                    if not os.path.isdir(scene_dir):
-                        raise ValueError(
-                            "ZIP must contain a folder like '000001/' at the top level"
-                        )
-                    # Read JSON files
-                    scene_gt_path = os.path.join(scene_dir, "scene_gt.json")
-                    if os.path.exists(scene_gt_path):
-                        with open(scene_gt_path) as f:
-                            new_gt = json.load(f)
-                        nonlocal scene_gt
-                        scene_gt = new_gt
+                # Extract to a persistent directory
+                extract_base = _persistent_extract_dir
+                if os.path.exists(extract_base):
+                    shutil.rmtree(extract_base, ignore_errors=True)
+                os.makedirs(extract_base, exist_ok=True)
+                zf.extractall(extract_base)
 
-                    # Re-build frame IDs
-                    nonlocal frame_ids, min_frame, max_frame
-                    frame_ids = sorted(int(k) for k in scene_gt.keys())
-                    min_frame, max_frame = frame_ids[0], frame_ids[-1]
+                # --- Find models/ folder anywhere in the extraction tree ---
+                models_dir = None
+                for root, dirs, files in os.walk(extract_base):
+                    if "models" in dirs:
+                        # Look for models/ or models_eval/
+                        for cand in dirs:
+                            if cand.startswith("models"):
+                                models_dir = os.path.join(root, cand)
+                                break
+                    if models_dir:
+                        break
 
-                    # Generate new predictions from uploaded GT
-                    nonlocal predictions
-                    predictions = generate_mock_predictions(scene_gt)
+                # --- Find the numeric scene folder (test/000002, train/000001, or top-level) ---
+                scene_dir = None
+                # First: look for a numeric-named folder at the top level
+                for d in sorted(os.listdir(extract_base)):
+                    full = os.path.join(extract_base, d)
+                    if os.path.isdir(full) and d.isdigit():
+                        scene_dir = full
+                        break
+                # If not found at top level, search inside test/, train/, val/ folders
+                if scene_dir is None:
+                    for split_name in ("test", "train", "val", "onboarding_static", "onboarding_dynamic"):
+                        split_path = os.path.join(extract_base, split_name)
+                        if os.path.isdir(split_path):
+                            for d in sorted(os.listdir(split_path)):
+                                full = os.path.join(split_path, d)
+                                if os.path.isdir(full) and d.isdigit():
+                                    scene_dir = full
+                                    break
+                        if scene_dir:
+                            break
+                # Last resort: walk the whole tree for scene_gt.json
+                if scene_dir is None:
+                    for root, dirs, files in os.walk(extract_base):
+                        if "scene_gt.json" in files:
+                            scene_dir = root
+                            break
+                if scene_dir is None:
+                    raise ValueError(
+                        "ZIP must contain a numeric scene folder (e.g. '000001/' or 'test/000001/') with scene_gt.json inside"
+                    )
 
-                    # Recompute IOUs
-                    nonlocal all_mask_ious
-                    all_mask_ious = {}
-                    for f_id in frame_ids:
-                        f_str = str(f_id)
-                        if f_str in scene_gt:
-                            for obj_idx, obj in enumerate(scene_gt[f_str]):
-                                gt_mask = load_mask(f_id, obj_idx)
-                                pred_mask = generate_mock_mask_prediction(
-                                    gt_mask if gt_mask is not None else np.zeros((480, 640), dtype=np.uint8),
-                                    f_id, obj["obj_id"],
-                                )
-                                if gt_mask is not None:
-                                    all_mask_ious[(f_id, obj["obj_id"])] = compute_iou(gt_mask, pred_mask)
+                # --- Read JSON files ---
+                scene_gt_path = os.path.join(scene_dir, "scene_gt.json")
+                if os.path.exists(scene_gt_path):
+                    with open(scene_gt_path) as f:
+                        new_gt = json.load(f)
+                    nonlocal scene_gt
+                    scene_gt = new_gt
 
-                    # Update slider range
-                    frame_slider.max = max_frame
-                    frame_slider.min = min_frame
-                    frame_slider.value = min_frame
+                # --- Load 3D CAD models ---
+                if models_dir and os.path.isdir(models_dir):
+                    loaded_count = 0
+                    for fname in sorted(os.listdir(models_dir)):
+                        if fname.endswith(".ply") and fname.startswith("obj_"):
+                            obj_id_str = fname.replace("obj_", "").replace(".ply", "")
+                            try:
+                                oid = int(obj_id_str)
+                                ply_path = os.path.join(models_dir, fname)
+                                mesh = trimesh.load(ply_path)
+                                _mesh_cache[oid] = mesh
+                                loaded_count += 1
+                                print(f"  Loaded uploaded mesh obj_{oid:06d}: {len(mesh.vertices)} vertices, {len(mesh.faces)} faces")
+                            except (ValueError, Exception) as exc:
+                                print(f"  Skipped {fname}: {exc}")
+                    if loaded_count > 0:
+                        print(f"Replaced {loaded_count} CAD models from upload.")
 
-                    predictions_container[0] = predictions
+                # --- Re-point all data directories to the uploaded scene ---
+                global DATA_DIR, RGB_DIR, MASK_DIR, MASK_VISIB_DIR, _FRAME_PAD
+                DATA_DIR = scene_dir
+                RGB_DIR = os.path.join(DATA_DIR, "rgb")
+                MASK_DIR = os.path.join(DATA_DIR, "mask")
+                MASK_VISIB_DIR = os.path.join(DATA_DIR, "mask_visib")
+                _FRAME_PAD = _detect_frame_padding(MASK_DIR)
+                print(f"  Detected frame padding: {_FRAME_PAD} digits")
+                # Re-build frame IDs
+                nonlocal frame_ids, min_frame, max_frame
+                frame_ids = sorted(int(k) for k in scene_gt.keys())
+                min_frame, max_frame = frame_ids[0], frame_ids[-1]
+
+                # Generate new predictions from uploaded GT
+                nonlocal predictions
+                predictions = generate_mock_predictions(scene_gt)
+
+                # Recompute IOUs
+                nonlocal all_mask_ious
+                all_mask_ious = {}
+                for f_id in frame_ids:
+                    f_str = str(f_id)
+                    if f_str in scene_gt:
+                        for obj_idx, obj in enumerate(scene_gt[f_str]):
+                            gt_mask = load_mask(f_id, obj_idx)
+                            pred_mask = generate_mock_mask_prediction(
+                                gt_mask if gt_mask is not None else np.zeros((480, 640), dtype=np.uint8),
+                                f_id, obj["obj_id"],
+                            )
+                            if gt_mask is not None:
+                                all_mask_ious[(f_id, obj["obj_id"])] = compute_iou(gt_mask, pred_mask)
+
+                # Update slider range
+                frame_slider.max = max_frame
+                frame_slider.min = min_frame
+                frame_slider.value = min_frame
+
+                predictions_container[0] = predictions
+
+                # Also update scene_camera and scene_gt_info if provided
+                scene_camera_path = os.path.join(scene_dir, "scene_camera.json")
+                if os.path.exists(scene_camera_path):
+                    with open(scene_camera_path) as f:
+                        nonlocal scene_camera
+                        scene_camera = json.load(f)
+                scene_gt_info_path = os.path.join(scene_dir, "scene_gt_info.json")
+                if os.path.exists(scene_gt_info_path):
+                    with open(scene_gt_info_path) as f:
+                        nonlocal scene_gt_info
+                        scene_gt_info = json.load(f)
 
                 n_frames = len(frame_ids)
                 upload_status.content = (
@@ -865,24 +988,34 @@ def main():
                 scene_handles.append(h_frame)
 
     def update_all(frame_id: int):
-        """Refresh 2D composite, 3D scene, error graph, and stats text."""
-        # 2D composite
-        comp = render_2d_composite(
-            frame_id, scene_gt, scene_gt_info, predictions,
-            show_gt_cb.value, show_pred_cb.value,
-        )
-        image_gui.image = comp
+        """Refresh 2D composite, 3D scene, error graph, and stats text.
+        
+        Uses ThreadPoolExecutor to render the 2D composite and mask diff
+        in parallel, and only updates the yellow frame marker in the
+        already-constructed Plotly figure (cheap ~2ms operation).
+        """
+        # Render images in parallel using thread pool
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            fut_2d = pool.submit(
+                render_2d_composite,
+                frame_id, scene_gt, scene_gt_info, predictions,
+                show_gt_cb.value, show_pred_cb.value,
+            )
+            fut_mask = pool.submit(
+                render_mask_diff,
+                frame_id, scene_gt, True, True,
+            )
+            comp = fut_2d.result()
+            md_img = fut_mask.result()
 
-        # Mask diff
-        md_img = render_mask_diff(frame_id, scene_gt, True, True)
+        image_gui.image = comp
         mask_diff_gui.image = md_img
 
         # 3D scene
         draw_3d_objects(frame_id)
 
-        # Error graph (redraw Plotly with current-frame marker)
-        eg = build_error_plotly(frame_ids, scene_gt, predictions, frame_id)
-        graph_gui.figure = eg
+        # Update only the yellow marker line in the Plotly graph (cheap)
+        _update_plotly_frame_marker(graph_gui, frame_id)
 
         # Stats markdown
         f_str = str(frame_id)
